@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   build-windows:
+    name: build-windows-x64-release
     runs-on: windows-latest
 
     steps:
@@ -23,22 +24,39 @@ jobs:
         with:
           arch: x64
 
-      - name: Ensure Ninja
+      - name: Check build tools
         shell: pwsh
         run: |
+          cmake --version
+
           if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
             choco install ninja -y --no-progress
           }
-          cmake --version
+
           ninja --version
 
       - name: Download Skia m124
         shell: pwsh
         run: |
           $url = "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip"
-          curl.exe -L $url -o skia.zip
+
+          curl.exe -fL $url -o skia.zip
+
+          if (-not (Test-Path skia.zip)) {
+            throw "skia.zip was not downloaded."
+          }
+
+          $size = (Get-Item skia.zip).Length
+          Write-Host "Downloaded skia.zip size: $size bytes"
+
+          if ($size -lt 1000000) {
+            throw "Skia download failed or file is too small."
+          }
+
           Expand-Archive -Path skia.zip -DestinationPath skia -Force
-          Get-ChildItem -Recurse skia/out | Select-Object FullName
+
+          Write-Host "Skia directory:"
+          Get-ChildItem -Recurse skia | Select-Object FullName
 
       - name: Configure
         shell: pwsh
@@ -71,6 +89,7 @@ jobs:
 
           foreach ($name in $patterns) {
             $found = where.exe $name 2>$null
+
             foreach ($file in $found) {
               if (Test-Path $file) {
                 Copy-Item $file build\bin -Force
@@ -79,6 +98,7 @@ jobs:
             }
           }
 
+          Write-Host "Final build/bin contents:"
           Get-ChildItem build\bin
 
       - name: Upload artifact
