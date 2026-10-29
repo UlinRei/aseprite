@@ -13,6 +13,10 @@ jobs:
     name: build-windows-x64-release
     runs-on: windows-latest
 
+    defaults:
+      run:
+        shell: pwsh
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -25,85 +29,197 @@ jobs:
           arch: x64
 
       - name: Check build tools
-        shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           cmake --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake is unavailable."
+          }
 
           if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
             choco install ninja -y --no-progress
-          }
-
-          ninja --version
-
-      - name: Download Skia m124
-        shell: pwsh
-        run: |
-          $url = "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip"
-
-          curl.exe -fL $url -o skia.zip
-
-          if (-not (Test-Path skia.zip)) {
-            throw "skia.zip was not downloaded."
-          }
-
-          $size = (Get-Item skia.zip).Length
-          Write-Host "Downloaded skia.zip size: $size bytes"
-
-          if ($size -lt 1000000) {
-            throw "Skia download failed or file is too small."
-          }
-
-          Expand-Archive -Path skia.zip -DestinationPath skia -Force
-
-          Write-Host "Skia directory:"
-          Get-ChildItem -Recurse skia | Select-Object FullName
-
-      - name: Configure
-        shell: pwsh
-        run: |
-          cmake -S . -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DENABLE_UI=on `
-            -DENABLE_CCACHE=off `
-            -DLAF_BACKEND=skia `
-            -DSKIA_DIR="$env:GITHUB_WORKSPACE\skia" `
-            -DSKIA_LIBRARY_DIR="$env:GITHUB_WORKSPACE\skia\out\Release-x64" `
-            -DSKIA_LIBRARY="$env:GITHUB_WORKSPACE\skia\out\Release-x64\skia.lib"
-
-      - name: Compile
-        shell: pwsh
-        run: |
-          cmake --build build --target aseprite --config Release
-
-      - name: Copy runtime DLLs from PATH if present
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path build\bin | Out-Null
-
-          $patterns = @(
-            "libcrypto-1_1-x64.dll",
-            "libssl-1_1-x64.dll",
-            "libcrypto-3-x64.dll",
-            "libssl-3-x64.dll"
-          )
-
-          foreach ($name in $patterns) {
-            $found = where.exe $name 2>$null
-
-            foreach ($file in $found) {
-              if (Test-Path $file) {
-                Copy-Item $file build\bin -Force
-                Write-Host "Copied $file"
-              }
+            if ($LASTEXITCODE -ne 0) {
+              throw "Ninja installation failed."
             }
           }
 
-          Write-Host "Final build/bin contents:"
-          Get-ChildItem build\bin
+          ninja --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Ninja is unavailable."
+          }
+
+          if (-not (Get-Command dumpbin -ErrorAction SilentlyContinue)) {
+            throw "dumpbin is unavailable."
+          }
+
+      - name: Download Skia m124
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # 下載固定版本的 Skia，維持原有建置環境。
+          $url = "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip"
+
+          curl.exe --fail --location --retry 3 $url --output skia.zip
+          if ($LASTEXITCODE -ne 0) {
+            throw "Skia download failed."
+          }
+
+          if (-not (Test-Path -LiteralPath skia.zip)) {
+            throw "skia.zip was not downloaded."
+          }
+
+          $size = (Get-Item -LiteralPath skia.zip).Length
+          Write-Host "Downloaded skia.zip size: $size bytes"
+
+          if ($size -lt 1000000) {
+            throw "Skia archive is unexpectedly small."
+          }
+
+          Expand-Archive -LiteralPath skia.zip -DestinationPath skia -Force
+
+          $skiaLibrary = Join-Path $env:GITHUB_WORKSPACE "skia\out\Release-x64\skia.lib"
+          if (-not (Test-Path -LiteralPath $skiaLibrary)) {
+            throw "Expected Skia library was not found: $skiaLibrary"
+          }
+
+      - name: Configure
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # 使用靜態函式庫與 Windows 內建 TLS。
+          # 同時指定新舊 curl 選項名稱，未使用的名稱可能產生 CMake 警告。
+          $cmakeArguments = @(
+            "-S", ".",
+            "-B", "build",
+            "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DENABLE_UI=ON",
+            "-DENABLE_CCACHE=OFF",
+            "-DBUILD_SHARED_LIBS=OFF",
+            "-DUSE_SHARED_CURL=OFF",
+            "-DCMAKE_USE_OPENSSL=OFF",
+            "-DCMAKE_USE_SCHANNEL=ON",
+            "-DCMAKE_USE_LIBSSH2=OFF",
+            "-DCURL_USE_OPENSSL=OFF",
+            "-DCURL_USE_SCHANNEL=ON",
+            "-DCURL_USE_LIBSSH2=OFF",
+            "-DLAF_BACKEND=skia",
+            "-DSKIA_DIR=$env:GITHUB_WORKSPACE\skia",
+            "-DSKIA_LIBRARY_DIR=$env:GITHUB_WORKSPACE\skia\out\Release-x64",
+            "-DSKIA_LIBRARY=$env:GITHUB_WORKSPACE\skia\out\Release-x64\skia.lib"
+          )
+
+          cmake @cmakeArguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake configuration failed."
+          }
+
+      - name: Compile
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          cmake --build build --target aseprite --config Release
+          if ($LASTEXITCODE -ne 0) {
+            throw "Aseprite compilation failed."
+          }
+
+      - name: Verify executable dependencies
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $executable = Join-Path $env:GITHUB_WORKSPACE "build\bin\aseprite.exe"
+          if (-not (Test-Path -LiteralPath $executable)) {
+            throw "aseprite.exe was not generated."
+          }
+
+          # 檢查實際產物，避免移除 DLL 後才發現無法啟動。
+          $dependencyOutput = & dumpbin /DEPENDENTS $executable 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Dependency inspection failed."
+          }
+
+          $dependencyText = $dependencyOutput -join "`n"
+          Write-Host $dependencyText
+
+          if ($dependencyText -match "(?i)\b(?:libcrypto|libssl)[^\s]*\.dll\b") {
+            throw "The executable still depends on OpenSSL DLLs. Packaging stopped."
+          }
+
+          if ($dependencyText -match "(?i)\b(?:libcurl|curl)\.dll\b") {
+            throw "The executable depends on an external curl DLL. Packaging stopped."
+          }
+
+      - name: Prepare release package
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $binDirectory = Join-Path $env:GITHUB_WORKSPACE "build\bin"
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE "release-package"
+
+          New-Item -ItemType Directory -Force -Path $releaseDirectory | Out-Null
+
+          # 明確選擇發行內容，不將 gen.exe 等建置工具一併打包。
+          $executable = Join-Path $binDirectory "aseprite.exe"
+          $dataDirectory = Join-Path $binDirectory "data"
+
+          if (-not (Test-Path -LiteralPath $dataDirectory -PathType Container)) {
+            throw "The runtime data directory was not generated."
+          }
+
+          Copy-Item -LiteralPath $executable -Destination $releaseDirectory
+          Copy-Item -LiteralPath $dataDirectory -Destination $releaseDirectory -Recurse
+
+          # 優先使用建置系統複製的 ICU 資料。
+          # 若沒有，從相同 Skia 套件尋找對應檔案。
+          $icuCandidates = @(
+            (Join-Path $binDirectory "icudtl.dat"),
+            (Join-Path $env:GITHUB_WORKSPACE "skia\out\Release-x64\icudtl.dat"),
+            (Join-Path $env:GITHUB_WORKSPACE "skia\third_party\externals\icu\flutter\icudtl.dat"),
+            (Join-Path $env:GITHUB_WORKSPACE "skia\third_party\externals\icu\common\icudtl.dat")
+          )
+
+          $icuFile = $icuCandidates |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+
+          if (-not $icuFile) {
+            throw "icudtl.dat was not found in the build output or Skia package."
+          }
+
+          Copy-Item -LiteralPath $icuFile -Destination $releaseDirectory
+
+          Write-Host "Release package contents:"
+          Get-ChildItem -LiteralPath $releaseDirectory
+
+      - name: Smoke test release package
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # 從發行目錄測試啟動，設定逾時以避免工作流程卡住。
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE "release-package"
+          $executable = Join-Path $releaseDirectory "aseprite.exe"
+
+          $process = Start-Process `
+            -FilePath $executable `
+            -ArgumentList "--version" `
+            -WorkingDirectory $releaseDirectory `
+            -WindowStyle Hidden `
+            -PassThru
+
+          if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            throw "Release executable startup timed out."
+          }
+
+          $process.Refresh()
+          if ($process.ExitCode -ne 0) {
+            throw "Release executable failed with exit code $($process.ExitCode)."
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: aseprite-windows-x64
-          path: build/bin/**
+          path: release-package/**
           if-no-files-found: error
