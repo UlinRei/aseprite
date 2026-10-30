@@ -96,6 +96,7 @@ jobs:
             "-DCMAKE_BUILD_TYPE=Release",
             "-DENABLE_UI=ON",
             "-DENABLE_CCACHE=OFF",
+            "-DENABLE_OPENSSL=OFF",
             "-DBUILD_SHARED_LIBS=OFF",
             "-DUSE_SHARED_CURL=OFF",
             "-DCMAKE_USE_OPENSSL=OFF",
